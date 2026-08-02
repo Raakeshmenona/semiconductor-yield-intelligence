@@ -1,0 +1,26 @@
+name: yield_intelligence
+version: "1.0.0"
+config-version: 2
+
+profile: yield_intelligence
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+
+target-path: target
+clean-targets: [target, dbt_packages]
+
+models:
+  yield_intelligence:
+    staging:
+      +schema: STAGING
+      +materialized: view
+    marts:
+      +schema: MARTS
+      +materialized: table
+
+vars:
+  # yield below (baseline - excursion_sigma * sigma) is an excursion
+  excursion_sigma: 3
+  cost_per_good_die_usd: 12.50

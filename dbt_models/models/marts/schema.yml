@@ -1,0 +1,39 @@
+version: 2
+
+models:
+  - name: fct_yield_excursion
+    description: >
+      One row per wafer lot with rolling robust baseline, excursion flag and
+      quantified dollar impact. Primary fact behind the executive dashboard
+      and the excursion drill-through.
+    columns:
+      - name: wafer_lot_id
+        tests: [not_null, unique]
+      - name: yield_pct
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 100
+      - name: yield_loss_cost_usd
+        description: Lost die vs baseline x cost per die (cost-avoidance KPI).
+
+  - name: dim_supplier_lot
+    description: >
+      Supplier batch dimension enriched with ML defect-contribution ranking.
+    columns:
+      - name: supplier_lot_id
+        tests: [not_null, unique]
+      - name: defect_contribution_score
+        description: Shrunken yield delta x -log10(p). Higher = more suspect.
+
+  - name: stg_bom
+    description: Cleaned BOM usage occurrences (parent/child + qty-per).
+    columns:
+      - name: bom_usage_key
+        tests: [not_null, unique]
+      - name: qty_per
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: false

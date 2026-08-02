@@ -1,0 +1,24 @@
+# Copy to ~/.dbt/profiles.yml (or set DBT_PROFILES_DIR) and fill in.
+yield_intelligence:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      role: TRANSFORMER
+      database: YIELD_INTEL
+      warehouse: COMPUTE_WH
+      schema: STAGING
+      threads: 8
+    prod:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_SVC_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_SVC_PASSWORD') }}"
+      role: TRANSFORMER_PROD
+      database: YIELD_INTEL
+      warehouse: TRANSFORM_WH
+      schema: STAGING
+      threads: 16

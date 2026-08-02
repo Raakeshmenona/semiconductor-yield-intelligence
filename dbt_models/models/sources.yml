@@ -1,0 +1,38 @@
+version: 2
+
+sources:
+  - name: raw
+    database: YIELD_INTEL
+    schema: RAW
+    description: >
+      Landing zone loaded by snowflake/yield_mart_loader.py from the SAP RFC
+      extractor, the Teamcenter PLMXML parser and the MES genealogy feed.
+    freshness:
+      warn_after: {count: 24, period: hour}
+      error_after: {count: 48, period: hour}
+    tables:
+      - name: BOM_NODES
+        description: Part master — one row per BOM node.
+      - name: BOM_EDGES
+        description: Parent/child usage with qty-per (multi-level DAG).
+      - name: COMPONENT_REVISIONS
+        description: ECN revision history for critical components.
+      - name: SUPPLIER_LOTS
+        description: Incoming supplier material batches.
+      - name: WAFER_LOTS
+        description: Production lots with yield outcome.
+        loaded_at_field: FAB_FINISH_DATE::timestamp
+      - name: WAFER_LOT_CONFIG
+        description: As-built genealogy (lot -> component rev + supplier lot).
+      - name: PROCESS_PARAMETERS
+        description: Per-lot process telemetry (10 parameters).
+
+  - name: analytics
+    database: YIELD_INTEL
+    schema: ANALYTICS
+    description: Python analytics outputs and the recursive-CTE BOM explosion.
+    tables:
+      - name: BOM_EXPLODED
+      - name: ROOT_CAUSE_SHORTLIST
+      - name: SUPPLIER_LOT_RANKING
+      - name: PROCESS_ANOMALIES

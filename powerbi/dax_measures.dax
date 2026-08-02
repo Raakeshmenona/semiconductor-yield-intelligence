@@ -1,0 +1,109 @@
+-------------------------------------------------------------------------------
+-- Power BI semantic model — DAX measures
+-- Model tables (DirectQuery/Import from Snowflake YIELD_INTEL):
+--   FctYieldExcursion  <- MARTS.FCT_YIELD_EXCURSION
+--   DimSupplierLot     <- MARTS.DIM_SUPPLIER_LOT
+--   LotGenealogy       <- STAGING.STG_LOT_GENEALOGY
+--   BomExploded        <- ANALYTICS.BOM_EXPLODED
+--   RootCauseShortlist <- ANALYTICS.ROOT_CAUSE_SHORTLIST
+--   DimDate            <- generated (marked as date table)
+-------------------------------------------------------------------------------
+
+-- ============================== Yield core ==================================
+Yield % =
+DIVIDE ( SUM ( FctYieldExcursion[good_die] ),
+         SUM ( FctYieldExcursion[wafers] ) * AVERAGE ( FctYieldExcursion[die_per_wafer] ) )
+
+Baseline Yield % =
+AVERAGE ( FctYieldExcursion[baseline_yield] ) / 100
+
+Yield Delta pp =
+( [Yield %] - [Baseline Yield %] ) * 100
+
+Excursion Lots =
+CALCULATE ( COUNTROWS ( FctYieldExcursion ),
+            FctYieldExcursion[is_excursion] = TRUE () )
+
+Excursion Rate % =
+DIVIDE ( [Excursion Lots], COUNTROWS ( FctYieldExcursion ) )
+
+-- ========================= Cost avoidance KPI ===============================
+Yield Loss Cost $ =
+SUM ( FctYieldExcursion[yield_loss_cost_usd] )
+
+Cost Avoidance per Run $ =
+-- manual RCA = 2.5 days of continued excursion production; automated < 10 min.
+-- Avoidance = loss rate of excursion lots x (2.5 days - 10 min) of production.
+VAR LossPerDay =
+    DIVIDE ( CALCULATE ( [Yield Loss Cost $],
+                         FctYieldExcursion[is_excursion] = TRUE () ),
+             DISTINCTCOUNT ( FctYieldExcursion[fab_start_date] ) )
+RETURN LossPerDay * 2.493
+
+-- ========================= Rolling / trend ==================================
+Yield 30d MA % =
+CALCULATE ( [Yield %],
+    DATESINPERIOD ( DimDate[Date], MAX ( DimDate[Date] ), -30, DAY ) )
+
+Yield vs 30d MA pp =
+( [Yield %] - [Yield 30d MA %] ) * 100
+
+-- ========================= Supplier Pareto ==================================
+Suspect Batches =
+CALCULATE ( COUNTROWS ( DimSupplierLot ),
+            DimSupplierLot[is_suspect_batch] = TRUE () )
+
+Supplier Defect Cost $ =
+SUM ( DimSupplierLot[est_cost_impact_usd] )
+
+Supplier Defect Cost Cumulative % =        -- Pareto line
+VAR Current = [Supplier Defect Cost $]
+VAR AllCost = CALCULATE ( SUM ( DimSupplierLot[est_cost_impact_usd] ),
+                          ALLSELECTED ( DimSupplierLot ) )
+VAR Running =
+    SUMX (
+        FILTER ( ALLSELECTED ( DimSupplierLot ),
+                 DimSupplierLot[defect_contribution_score]
+                     >= MAX ( DimSupplierLot[defect_contribution_score] ) ),
+        DimSupplierLot[est_cost_impact_usd] )
+RETURN DIVIDE ( Running, AllCost )
+
+-- ===================== BOM hierarchy (PATH-based slicer) ====================
+-- BomExploded[path] is 'IX-9000 > PN-100004 > ...'. Substitute the delimiter
+-- so DAX PATH functions work, then expose per-level columns for the
+-- hierarchy slicer + drill-through.
+BOM Path (pipe) =                          -- calculated COLUMN on BomExploded
+SUBSTITUTE ( BomExploded[path], " > ", "|" )
+
+BOM Level 1 = PATHITEM ( BomExploded[BOM Path (pipe)], 1 )   -- product
+BOM Level 2 = PATHITEM ( BomExploded[BOM Path (pipe)], 2 )   -- subsystem
+BOM Level 3 = PATHITEM ( BomExploded[BOM Path (pipe)], 3 )   -- module
+BOM Level 4 = PATHITEM ( BomExploded[BOM Path (pipe)], 4 )   -- assembly
+BOM Level 5 = PATHITEM ( BomExploded[BOM Path (pipe)], 5 )   -- subassembly
+
+Components In Scope =                      -- responds to the hierarchy slicer
+DISTINCTCOUNT ( BomExploded[component_id] )
+
+Extended Qty per Unit =
+SUM ( BomExploded[extended_qty] )
+
+-- ================== Excursion drill-through helpers =========================
+Selected Lot Yield % =
+SELECTEDVALUE ( FctYieldExcursion[yield_pct] ) / 100
+
+Selected Lot Suspect Components =
+CALCULATE (
+    CONCATENATEX (
+        TOPN ( 3,
+               SUMMARIZE ( LotGenealogy,
+                           LotGenealogy[component_name],
+                           LotGenealogy[supplier_lot_id] ),
+               RELATED ( DimSupplierLot[defect_contribution_score] ), DESC ),
+        LotGenealogy[component_name] & " (" & LotGenealogy[supplier_lot_id] & ")",
+        ", " ) )
+
+Root Cause Verdict =
+VAR TopFactor =
+    CALCULATE ( MAX ( RootCauseShortlist[factor] ),
+                RootCauseShortlist[rank] = 1 )
+RETURN "Most likely driver: " & TopFactor

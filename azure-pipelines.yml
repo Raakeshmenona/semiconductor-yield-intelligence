@@ -1,0 +1,120 @@
+# Azure DevOps CI/CD — Semiconductor Yield Intelligence Pipeline
+# Stages: Lint -> Test (pytest + KPI smoke) -> dbt compile -> Deploy (main only)
+
+trigger:
+  branches:
+    include: [main, develop]
+  paths:
+    exclude: [README.md, powerbi/*]
+
+pr:
+  branches:
+    include: [main]
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  pythonVersion: "3.11"
+
+stages:
+  # ------------------------------------------------------------------ #
+  - stage: Lint
+    displayName: Static checks
+    jobs:
+      - job: lint
+        steps:
+          - task: UsePythonVersion@0
+            inputs: {versionSpec: "$(pythonVersion)"}
+          - script: |
+              python -m pip install --upgrade pip
+              pip install ruff==0.4.4
+              ruff check bom analytics snowflake data scripts tests
+            displayName: ruff
+
+  # ------------------------------------------------------------------ #
+  - stage: Test
+    displayName: Unit tests + pipeline smoke
+    dependsOn: Lint
+    jobs:
+      - job: pytest
+        steps:
+          - task: UsePythonVersion@0
+            inputs: {versionSpec: "$(pythonVersion)"}
+          - script: |
+              pip install -r requirements.txt
+              pytest tests -v --junitxml=junit/test-results.xml \
+                     --cov=bom --cov=analytics --cov-report=xml
+            displayName: pytest + coverage
+          - script: |
+              # end-to-end smoke on a reduced dataset; fails the build if the
+              # ML shortlist misses the injected root causes or KPIs breach
+              python data/generate_synthetic_data.py --nodes 2000 --lots 250
+              python scripts/run_pipeline_local.py --validate
+            displayName: pipeline smoke (KPI + ground-truth validation)
+          - task: PublishTestResults@2
+            inputs: {testResultsFiles: "junit/test-results.xml"}
+            condition: succeededOrFailed()
+          - task: PublishCodeCoverageResults@2
+            inputs: {summaryFileLocation: coverage.xml}
+
+  # ------------------------------------------------------------------ #
+  - stage: DbtCompile
+    displayName: dbt parse & compile
+    dependsOn: Test
+    jobs:
+      - job: dbt
+        steps:
+          - task: UsePythonVersion@0
+            inputs: {versionSpec: "$(pythonVersion)"}
+          - script: |
+              pip install dbt-snowflake
+              cd dbt_models
+              dbt deps
+              dbt parse --no-partial-parse
+            displayName: dbt deps + parse
+            env:
+              # dummy creds are enough to parse; real compile runs in Deploy
+              SNOWFLAKE_ACCOUNT: ci-placeholder
+              SNOWFLAKE_USER: ci
+              SNOWFLAKE_PASSWORD: ci
+              DBT_PROFILES_DIR: .
+
+  # ------------------------------------------------------------------ #
+  - stage: Deploy
+    displayName: Deploy (Snowflake + Airflow + dbt prod run)
+    dependsOn: DbtCompile
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: prod
+        environment: yield-intel-prod        # gated with manual approval
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: UsePythonVersion@0
+                  inputs: {versionSpec: "$(pythonVersion)"}
+                - script: |
+                    pip install -r requirements.txt snowflake-connector-python
+                    python snowflake/yield_mart_loader.py \
+                        --raw data/raw --outputs data/outputs
+                  displayName: load Snowflake raw + analytics layer
+                  env:
+                    SNOWFLAKE_ACCOUNT: $(SNOWFLAKE_ACCOUNT)
+                    SNOWFLAKE_USER: $(SNOWFLAKE_SVC_USER)
+                    SNOWFLAKE_PASSWORD: $(SNOWFLAKE_SVC_PASSWORD)
+                - script: |
+                    pip install dbt-snowflake
+                    cd dbt_models && dbt deps && dbt build --target prod
+                  displayName: dbt build (prod)
+                  env:
+                    SNOWFLAKE_ACCOUNT: $(SNOWFLAKE_ACCOUNT)
+                    SNOWFLAKE_SVC_USER: $(SNOWFLAKE_SVC_USER)
+                    SNOWFLAKE_SVC_PASSWORD: $(SNOWFLAKE_SVC_PASSWORD)
+                - script: |
+                    az storage blob upload-batch \
+                      --destination airflow-dags \
+                      --source airflow/dags --overwrite
+                  displayName: publish Airflow DAGs
+                  condition: succeeded()
